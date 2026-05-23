@@ -27,11 +27,11 @@ if [ "$1" = "filebrowser" ]; then
         # Switch to password auth
         filebrowser config set --database filebrowser.db --auth.method "json" >/dev/null 2>&1 || true
         echo "[filebrowser] Authentication enabled (user: admin)"
-        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --database filebrowser.db
+        exec filebrowser -r /root/.hermes -p 8081 -a 0.0.0.0 --database filebrowser.db
     else
         # No auth: run with --noauth
         echo "[filebrowser] Running without authentication (--noauth)"
-        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --database filebrowser.db --noauth
+        exec filebrowser -r /root/.hermes -p 8081 -a 0.0.0.0 --database filebrowser.db --noauth
     fi
 fi
 
