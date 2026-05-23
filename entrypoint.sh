@@ -15,6 +15,11 @@ if [ "$AUTO_UPDATE" = "true" ]; then
   fi
 fi
 
-hermes dashboard --host 127.0.0.1 --port 9119 --no-open &
+# Ensure data directory exists (for File Browser + volume mount)
+mkdir -p /app/data
 
-exec python /auth_proxy.py
+# Start supervisord which manages all processes:
+# - hermes dashboard (port 9119)
+# - auth proxy (port from $PORT env)
+# - filebrowser (port 8080)
+exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf

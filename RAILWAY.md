@@ -8,6 +8,8 @@ Your own AI agent, running 24/7, talking to you on Telegram. Think OpenClaw, but
 
 No YAML files. No SSH. No "just clone the repo and figure it out." This template gives you a fully managed Hermes Agent accessible from your browser. Add API keys, connect messaging platforms, manage sessions, view analytics, and schedule cron jobs — all from the dashboard. The messaging gateway runs alongside it and automatically restarts when you change settings. Attach a Railway volume and your data sticks around forever.
 
+**New:** File Browser is now embedded in the same container! Access all your agent's files directly through a web UI at port 8080 — no need to detach and reattach volumes between services.
+
 ## Getting Started
 
 ### 1. Deploy to Railway
@@ -44,11 +46,45 @@ Attach a Railway volume so your config, sessions, and memories survive redeploys
 2. Select **Attach Volume**
 3. Set mount path to `/root/.hermes`
 
+## File Browser (Embedded)
+
+This deployment includes **File Browser** running inside the same container, giving you direct web access to your agent's files without needing a separate service.
+
+### Accessing File Browser
+
+1. In your Railway dashboard, click on your service
+2. Go to the **Settings** tab
+3. Under **Networking**, add a new public domain/port mapping for port **8080**
+4. Railway will generate a URL like `https://your-service-8080.up.railway.app`
+5. Open that URL to access the File Browser UI
+
+### What You Can Do
+
+- Browse, upload, download, and manage files in `/app/data`
+- View and edit text files directly in the browser
+- Create folders and organize your agent's outputs
+- The File Browser shares the same filesystem as the agent
+
+### Volume Mount for File Browser
+
+If you want File Browser's files to persist across redeploys, you can either:
+
+- **Option A (Recommended):** Mount the same volume at `/app/data` — this gives you a persistent file storage accessible by both the agent and File Browser
+- **Option B:** Use the existing `/root/.hermes` volume mount — agent files (config, sessions, skills) persist there, and you can access them via the agent's tools
+
+### File Browser Configuration
+
+By default, File Browser runs with **no authentication** (`--noauth`) for ease of use within Railway's private networking. If you need authentication:
+
+1. Set the environment variable `FILEBROWSER_PASSWORD` in Railway
+2. The entrypoint will automatically configure File Browser with a basic auth user `admin` and that password
+
 ## Common Use Cases
 
 - Run a personal AI assistant on Telegram, Discord, or Slack with persistent memory and tool use
 - Manage your agent from any browser — configure models, API keys, sessions, and analytics through the dashboard
 - Schedule recurring AI tasks with cron jobs and monitor usage and costs
+- Access and manage your agent's files directly through the built-in File Browser
 
 ## Dependencies
 
