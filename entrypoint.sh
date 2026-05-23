@@ -16,11 +16,11 @@ if [ "$1" = "filebrowser" ]; then
         filebrowser config init --database filebrowser.db > /dev/null 2>&1 || true
         filebrowser users add admin "$FB_PASSWORD" --perm.admin --database filebrowser.db > /dev/null 2>&1 || true
         echo "[filebrowser] Authentication enabled (user: admin)"
-        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --database filebrowser.db
+        exec filebrowser -c /filebrowser.json
     else
-        # No auth: run with --noauth
+        # No auth: use config file with noauth
         echo "[filebrowser] Running without authentication (--noauth)"
-        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --noauth
+        exec filebrowser -c /filebrowser.json
     fi
 fi
 

@@ -1,0 +1,59 @@
+{
+  "port": 8081,
+  "baseURL": "",
+  "address": "0.0.0.0",
+  "log": "stdout",
+  "database": "/var/lib/filebrowser/filebrowser.db",
+  "root": "/root/.hermes/data",
+  "settings": {
+    "signup": false,
+    "createUserDir": false,
+    "userHomeBasePath": "/users",
+    "defaults": {
+      "scope": ".",
+      "locale": "pt-br",
+      "viewMode": "list",
+      "singleClick": false,
+      "sorting": {
+        "by": "",
+        "asc": false
+      },
+      "perm": {
+        "admin": true,
+        "execute": true,
+        "create": true,
+        "rename": true,
+        "modify": true,
+        "delete": true,
+        "share": true,
+        "download": true
+      },
+      "commands": [],
+      "hideDotfiles": false,
+      "dateFormat": false
+    },
+    "authMethod": "noauth",
+    "branding": {
+      "name": "Hermes Files",
+      "disableExternal": false,
+      "disableUsedPercentage": false,
+      "files": "",
+      "theme": "dark",
+      "color": "#2dd4bf"
+    },
+    "commands": {
+      "after_copy": [],
+      "after_delete": [],
+      "after_rename": [],
+      "after_save": [],
+      "after_upload": [],
+      "before_copy": [],
+      "before_delete": [],
+      "before_rename": [],
+      "before_save": [],
+      "before_upload": []
+    },
+    "shell": [],
+    "rules": []
+  }
+}
