@@ -72,12 +72,19 @@ If you want File Browser's files to persist across redeploys, you can either:
 - **Option A (Recommended):** Mount the same volume at `/app/data` — this gives you a persistent file storage accessible by both the agent and File Browser
 - **Option B:** Use the existing `/root/.hermes` volume mount — agent files (config, sessions, skills) persist there, and you can access them via the agent's tools
 
-### File Browser Configuration
+### File Browser Authentication
 
-By default, File Browser runs with **no authentication** (`--noauth`) for ease of use within Railway's private networking. If you need authentication:
+File Browser supports optional authentication via environment variable:
 
-1. Set the environment variable `FILEBROWSER_PASSWORD` in Railway
-2. The entrypoint will automatically configure File Browser with a basic auth user `admin` and that password
+| Modo | Como configurar |
+|------|-----------------|
+| **Sem senha** (padrão) | Não defina `FILEBROWSER_PASSWORD` — acesso livre com `--noauth` |
+| **Com senha** | Defina `FILEBROWSER_PASSWORD` no Railway → login obrigatório (user: `admin`) |
+
+Para ativar a senha, vá em **Variables** no Railway e adicione:
+- `FILEBROWSER_PASSWORD` = sua senha escolhida
+
+O File Browser reinicia automaticamente com autenticação habilitada.
 
 ## Common Use Cases
 
