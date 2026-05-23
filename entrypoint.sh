@@ -5,7 +5,7 @@ set -e
 # Subcommand: filebrowser (called by supervisord)
 # ─────────────────────────────────────────────────────────────
 if [ "$1" = "filebrowser" ]; then
-    mkdir -p /app/data /var/lib/filebrowser
+    mkdir -p /root/.hermes/data /var/lib/filebrowser
     cd /var/lib/filebrowser
 
     FB_PASSWORD="${FILEBROWSER_PASSWORD:-}"
@@ -13,14 +13,14 @@ if [ "$1" = "filebrowser" ]; then
     if [ -n "$FB_PASSWORD" ]; then
         # Auth enabled: create user admin with the provided password
         rm -f filebrowser.db
-        filebrowser config init --database filebrowser.db >/dev/null 2>&1 || true
-        filebrowser users add admin "$FB_PASSWORD" --perm.admin --database filebrowser.db >/dev/null 2>&1 || true
+        filebrowser config init --database filebrowser.db > /dev/null 2>&1 || true
+        filebrowser users add admin "$FB_PASSWORD" --perm.admin --database filebrowser.db > /dev/null 2>&1 || true
         echo "[filebrowser] Authentication enabled (user: admin)"
-        exec filebrowser -r /app/data -p 8080 -a 0.0.0.0 --database filebrowser.db
+        exec filebrowser -r /root/.hermes/data -p 8080 -a 0.0.0.0 --database filebrowser.db
     else
         # No auth: run with --noauth
         echo "[filebrowser] Running without authentication (--noauth)"
-        exec filebrowser -r /app/data -p 8080 -a 0.0.0.0 --noauth
+        exec filebrowser -r /root/.hermes/data -p 8080 -a 0.0.0.0 --noauth
     fi
 fi
 
@@ -41,10 +41,14 @@ if [ "$AUTO_UPDATE" = "true" ]; then
   fi
 fi
 
-# Ensure data directory exists and set as working directory
-# This makes all files created by Hermes appear in File Browser
-mkdir -p /app/data
-cd /app/data
+# Single volume setup: everything under /root/.hermes
+# Create data subdir for File Browser and set as working directory
+mkdir -p /root/.hermes/data
+cd /root/.hermes/data
+
+# Symlink /app/data to the actual data directory for compatibility
+rm -rf /app/data
+ln -sf /root/.hermes/data /app/data
 
 # Start supervisord which manages all processes:
 # - hermes dashboard (port 9119)
