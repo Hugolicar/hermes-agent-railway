@@ -16,11 +16,11 @@ if [ "$1" = "filebrowser" ]; then
         filebrowser config init --database filebrowser.db > /dev/null 2>&1 || true
         filebrowser users add admin "$FB_PASSWORD" --perm.admin --database filebrowser.db > /dev/null 2>&1 || true
         echo "[filebrowser] Authentication enabled (user: admin)"
-        exec filebrowser -r /root/.hermes/data -p 8080 -a 0.0.0.0 --database filebrowser.db
+        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --database filebrowser.db
     else
         # No auth: run with --noauth
         echo "[filebrowser] Running without authentication (--noauth)"
-        exec filebrowser -r /root/.hermes/data -p 8080 -a 0.0.0.0 --noauth
+        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --noauth
     fi
 fi
 
@@ -52,6 +52,6 @@ ln -sf /root/.hermes/data /app/data
 
 # Start supervisord which manages all processes:
 # - hermes dashboard (port 9119)
-# - auth proxy (port from $PORT env)
-# - filebrowser (port 8080)
+# - auth proxy (port 8080)
+# - filebrowser (port 8081)
 exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
