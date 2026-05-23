@@ -10,17 +10,28 @@ if [ "$1" = "filebrowser" ]; then
 
     FB_PASSWORD="${FILEBROWSER_PASSWORD:-}"
 
+    # Always recreate database to ensure settings are applied
+    rm -f filebrowser.db
+    filebrowser config init --database filebrowser.db >/dev/null 2>&1 || true
+
+    # Apply branding settings
+    filebrowser config set --database filebrowser.db --branding.name "Hermes Files" >/dev/null 2>&1 || true
+    filebrowser config set --database filebrowser.db --branding.theme "dark" >/dev/null 2>&1 || true
+    filebrowser config set --database filebrowser.db --branding.color "#2dd4bf" >/dev/null 2>&1 || true
+    filebrowser config set --database filebrowser.db --signup false >/dev/null 2>&1 || true
+    filebrowser config set --database filebrowser.db --auth.method "noauth" >/dev/null 2>&1 || true
+
     if [ -n "$FB_PASSWORD" ]; then
         # Auth enabled: create user admin with the provided password
-        rm -f filebrowser.db
-        filebrowser config init --database filebrowser.db > /dev/null 2>&1 || true
-        filebrowser users add admin "$FB_PASSWORD" --perm.admin --database filebrowser.db > /dev/null 2>&1 || true
+        filebrowser users add admin "$FB_PASSWORD" --perm.admin --database filebrowser.db >/dev/null 2>&1 || true
+        # Switch to password auth
+        filebrowser config set --database filebrowser.db --auth.method "json" >/dev/null 2>&1 || true
         echo "[filebrowser] Authentication enabled (user: admin)"
-        exec filebrowser -c /filebrowser.json
+        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --database filebrowser.db
     else
-        # No auth: use config file with noauth
+        # No auth: run with --noauth
         echo "[filebrowser] Running without authentication (--noauth)"
-        exec filebrowser -c /filebrowser.json
+        exec filebrowser -r /root/.hermes/data -p 8081 -a 0.0.0.0 --database filebrowser.db --noauth
     fi
 fi
 
