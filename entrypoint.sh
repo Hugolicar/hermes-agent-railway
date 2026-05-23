@@ -41,8 +41,10 @@ if [ "$AUTO_UPDATE" = "true" ]; then
   fi
 fi
 
-# Ensure data directory exists (for File Browser + volume mount)
+# Ensure data directory exists and set as working directory
+# This makes all files created by Hermes appear in File Browser
 mkdir -p /app/data
+cd /app/data
 
 # Start supervisord which manages all processes:
 # - hermes dashboard (port 9119)
