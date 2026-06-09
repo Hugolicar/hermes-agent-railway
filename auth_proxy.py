@@ -1,46 +1,29 @@
 #!/usr/bin/env python3
-"""Cookie-based auth proxy for Hermes dashboard on Railway."""
+"""Cookie-aware auth proxy for Hermes dashboard on Railway.
 
-import hashlib
-import hmac
+This proxy is a thin pass-through plus a custom-branded login page that
+delegates authentication to the basic auth provider running in the upstream
+Hermes dashboard (:9119). It does NOT maintain its own credential store or
+session cookie — every login, session, and ticket is handled by the
+upstream, so a single sign-in covers browser + Hermes Desktop /api/ws.
+"""
+
 import os
-import secrets
 import string
-import subprocess
 import sys
-import time
 
 from aiohttp import web, ClientSession, WSMsgType
+import asyncio
 
 HERMES_HOME = "/root/.hermes"
 UPSTREAM = "http://127.0.0.1:9119"
-USERNAME = os.environ.get("DASHBOARD_USER", "admin")
-PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
-SECRET = secrets.token_bytes(32)
-COOKIE = "hermes_auth"
-MAX_AGE = 7 * 86400
 
-if not PASSWORD:
-    print("ERROR: DASHBOARD_PASSWORD must be set.", file=sys.stderr)
+if not os.environ.get("DASHBOARD_USER") or not os.environ.get("DASHBOARD_PASSWORD"):
+    print("ERROR: DASHBOARD_USER and DASHBOARD_PASSWORD must be set.", file=sys.stderr)
     sys.exit(1)
 
 
-def make_token():
-    expires = str(int(time.time()) + MAX_AGE)
-    sig = hmac.new(SECRET, expires.encode(), hashlib.sha256).hexdigest()
-    return f"{expires}.{sig}"
-
-
-def check_token(token):
-    try:
-        expires, sig = token.rsplit(".", 1)
-        if int(expires) < time.time():
-            return False
-        expected = hmac.new(SECRET, expires.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(sig, expected)
-    except Exception:
-        return False
-
+# -- Custom branded login page (teal/dark, matches user's skin) --
 
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
@@ -94,128 +77,24 @@ LOGIN_HTML = """<!DOCTYPE html>
     pointer-events: none;
     opacity: 0.5;
   }
-  @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(16px); }
-    to { opacity: 1; transform: translateY(0); }
-  }
-  @keyframes lineGrow {
-    from { transform: scaleX(0); }
-    to { transform: scaleX(1); }
-  }
-  .login-wrapper {
-    position: relative;
-    z-index: 1;
-    width: 100%;
-    max-width: 400px;
-    padding: 0 1.5rem;
-    animation: fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
-  }
-  .brand {
-    text-align: center;
-    margin-bottom: 3rem;
-  }
-  .brand-icon {
-    width: 36px;
-    height: 36px;
-    margin: 0 auto 1.2rem;
-    border: 1.5px solid var(--accent);
-    border-radius: 10px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--accent);
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 1.1rem;
-    font-weight: 600;
-    opacity: 0;
-    animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both;
-  }
-  .brand h1 {
-    font-family: 'Cormorant Garamond', serif;
-    font-weight: 400;
-    font-size: 1.6rem;
-    letter-spacing: 0.12em;
-    text-transform: uppercase;
-    color: var(--text);
-    opacity: 0;
-    animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both;
-  }
-  .brand p {
-    font-size: 0.78rem;
-    color: var(--text-muted);
-    margin-top: 0.5rem;
-    letter-spacing: 0.04em;
-    opacity: 0;
-    animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both;
-  }
-  .divider {
-    height: 1px;
-    background: linear-gradient(90deg, transparent, var(--border-focus), transparent);
-    margin-bottom: 2.5rem;
-    transform-origin: center;
-    animation: lineGrow 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.4s both;
-  }
-  .card {
-    opacity: 0;
-    animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.45s both;
-  }
-  .field {
-    margin-bottom: 1.25rem;
-  }
-  label {
-    display: block;
-    font-size: 0.7rem;
-    font-weight: 500;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    margin-bottom: 0.5rem;
-  }
-  input {
-    width: 100%;
-    padding: 0.75rem 1rem;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    color: var(--text);
-    font-family: 'DM Sans', sans-serif;
-    font-size: 0.9rem;
-    outline: none;
-    transition: border-color 0.3s, box-shadow 0.3s;
-  }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes lineGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  .login-wrapper { position: relative; z-index: 1; width: 100%; max-width: 400px; padding: 0 1.5rem; animation: fadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .brand { text-align: center; margin-bottom: 3rem; }
+  .brand-icon { width: 36px; height: 36px; margin: 0 auto 1.2rem; border: 1.5px solid var(--accent); border-radius: 10px; display: flex; align-items: center; justify-content: center; color: var(--accent); font-family: 'Cormorant Garamond', serif; font-size: 1.1rem; font-weight: 600; opacity: 0; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.1s both; }
+  .brand h1 { font-family: 'Cormorant Garamond', serif; font-weight: 400; font-size: 1.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text); opacity: 0; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.2s both; }
+  .brand p { font-size: 0.78rem; color: var(--text-muted); margin-top: 0.5rem; letter-spacing: 0.04em; opacity: 0; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.3s both; }
+  .divider { height: 1px; background: linear-gradient(90deg, transparent, var(--border-focus), transparent); margin-bottom: 2.5rem; transform-origin: center; animation: lineGrow 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.4s both; }
+  .card { opacity: 0; animation: fadeUp 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.45s both; }
+  .field { margin-bottom: 1.25rem; }
+  label { display: block; font-size: 0.7rem; font-weight: 500; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.5rem; }
+  input { width: 100%; padding: 0.75rem 1rem; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font-family: 'DM Sans', sans-serif; font-size: 0.9rem; outline: none; transition: border-color 0.3s, box-shadow 0.3s; }
   input::placeholder { color: var(--text-muted); opacity: 0.5; }
-  input:focus {
-    border-color: var(--border-focus);
-    box-shadow: 0 0 0 3px var(--accent-dim);
-  }
-  button {
-    width: 100%;
-    padding: 0.8rem;
-    margin-top: 0.5rem;
-    background: var(--accent);
-    color: var(--bg);
-    border: none;
-    border-radius: 8px;
-    font-family: 'DM Sans', sans-serif;
-    font-size: 0.85rem;
-    font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: transform 0.2s, opacity 0.2s;
-  }
+  input:focus { border-color: var(--border-focus); box-shadow: 0 0 0 3px var(--accent-dim); }
+  button { width: 100%; padding: 0.8rem; margin-top: 0.5rem; background: var(--accent); color: var(--bg); border: none; border-radius: 8px; font-family: 'DM Sans', sans-serif; font-size: 0.85rem; font-weight: 500; letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer; transition: transform 0.2s, opacity 0.2s; }
   button:hover { opacity: 0.88; transform: translateY(-1px); }
   button:active { transform: translateY(0); }
-  .error {
-    background: var(--error-bg);
-    border: 1px solid var(--error-border);
-    color: var(--error-text);
-    padding: 0.6rem 0.9rem;
-    border-radius: 8px;
-    font-size: 0.8rem;
-    margin-bottom: 1.25rem;
-    text-align: center;
-  }
+  .error { background: var(--error-bg); border: 1px solid var(--error-border); color: var(--error-text); padding: 0.6rem 0.9rem; border-radius: 8px; font-size: 0.8rem; margin-bottom: 1.25rem; text-align: center; }
 </style>
 </head>
 <body>
@@ -242,7 +121,8 @@ LOGIN_HTML = """<!DOCTYPE html>
   </div>
 </div>
 </body>
-</html>"""
+</html>
+"""
 
 
 async def login_page(request):
@@ -256,75 +136,84 @@ async def login_page(request):
 
 
 async def login_post(request):
+    """Bridge: form POST -> upstream /auth/password-login. Forward upstream Set-Cookie to browser."""
     data = await request.post()
     username = data.get("username", "")
     password = data.get("password", "")
 
-    if hmac.compare_digest(username, USERNAME) and hmac.compare_digest(password, PASSWORD):
-        resp = web.HTTPFound("/")
-        resp.set_cookie(COOKIE, make_token(), max_age=MAX_AGE, httponly=True, samesite="Lax")
-        return resp
+    async with ClientSession() as session:
+        try:
+            async with session.post(
+                f"{UPSTREAM}/auth/password-login",
+                json={"username": username, "password": password},
+                allow_redirects=False,
+                timeout=10,
+            ) as upstream_resp:
+                # Success: 200/204 -> redirect to /
+                if upstream_resp.status in (200, 204):
+                    resp = web.HTTPFound("/")
+                    for k, v in upstream_resp.headers.items():
+                        if k.lower() == "set-cookie":
+                            cookie_val = v.split(";", 1)[0]
+                            if "=" in cookie_val:
+                                cookie_name, cookie_v = cookie_val.split("=", 1)
+                                resp.set_cookie(
+                                    cookie_name.strip(),
+                                    cookie_v.strip(),
+                                    max_age=12 * 3600,
+                                    httponly=True,
+                                    samesite="Lax",
+                                    path="/",
+                                )
+                    return resp
+        except Exception as e:
+            print(f"[auth_proxy] upstream login error: {e}", file=sys.stderr)
 
     raise web.HTTPFound("/login?error=1")
 
 
 async def logout(request):
+    """Forward logout to upstream, clear upstream cookies, redirect to /login."""
+    async with ClientSession() as session:
+        try:
+            cookies = {}
+            for k, v in request.cookies.items():
+                cookies[k] = v
+            async with session.post(
+                f"{UPSTREAM}/auth/logout",
+                cookies=cookies,
+                allow_redirects=False,
+                timeout=5,
+            ):
+                pass
+        except Exception:
+            pass
     resp = web.HTTPFound("/login")
-    resp.del_cookie(COOKIE)
+    resp.del_cookie("session", path="/")
     return resp
 
 
+# -- Health check (used by Railway) --
+
+async def health(request):
+    # Also check upstream reachability
+    try:
+        async with ClientSession() as session:
+            async with session.get(f"{UPSTREAM}/api/health", timeout=2) as r:
+                upstream_ok = r.status == 200
+    except Exception:
+        upstream_ok = False
+    return web.json_response({"status": "ok", "upstream_ok": upstream_ok})
+
+
+# -- Pass-through middleware: no auth gating here. Upstream handles it. --
+
 @web.middleware
-async def auth_middleware(request, handler):
-    if request.path in ("/login", "/logout", "/api/health"):
-        return await handler(request)
-
-    token = request.cookies.get(COOKIE)
-    if not token or not check_token(token):
-        if request.path.startswith("/api/"):
-            raise web.HTTPUnauthorized()
-        raise web.HTTPFound("/login")
-
+async def pass_through_middleware(request, handler):
     return await handler(request)
 
 
-gateway_process = None
-
-
-def start_gateway():
-    global gateway_process
-    if gateway_process and gateway_process.poll() is None:
-        gateway_process.terminate()
-        try:
-            gateway_process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            gateway_process.kill()
-    gateway_process = subprocess.Popen(["hermes", "gateway", "run"])
-
-
-RESTART_PATHS = {
-    ("PUT", "/api/config"),
-    ("PUT", "/api/env"),
-    ("DELETE", "/api/env"),
-}
-
-
-def volume_attached():
-    return os.path.ismount(HERMES_HOME)
-
-
-async def restart_gateway(request):
-    start_gateway()
-    return web.json_response({"status": "gateway restarted"})
-
-
-async def gateway_status(request):
-    running = gateway_process is not None and gateway_process.poll() is None
-    return web.json_response({
-        "running": running,
-        "volume": volume_attached(),
-    })
-
+# -- Gateway widget injection into HTML responses (unchanged from prior) --
 
 GATEWAY_WIDGET = """
 <div id="gw-widget" style="position:fixed;bottom:20px;right:20px;z-index:99999;
@@ -366,8 +255,44 @@ gwStatus();setInterval(gwStatus,10000);
 """
 
 
-async def health(request):
-    return web.json_response({"status": "ok"})
+import subprocess
+
+gateway_process = None
+
+
+def start_gateway():
+    global gateway_process
+    if gateway_process and gateway_process.poll() is None:
+        gateway_process.terminate()
+        try:
+            gateway_process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            gateway_process.kill()
+    gateway_process = subprocess.Popen(["hermes", "gateway", "run"])
+
+
+RESTART_PATHS = {
+    ("PUT", "/api/config"),
+    ("PUT", "/api/env"),
+    ("DELETE", "/api/env"),
+}
+
+
+def volume_attached():
+    return os.path.ismount(HERMES_HOME)
+
+
+async def restart_gateway(request):
+    start_gateway()
+    return web.json_response({"status": "gateway restarted"})
+
+
+async def gateway_status(request):
+    running = gateway_process is not None and gateway_process.poll() is None
+    return web.json_response({
+        "running": running,
+        "volume": volume_attached(),
+    })
 
 
 async def proxy_ws(request):
@@ -376,7 +301,12 @@ async def proxy_ws(request):
 
     async with ClientSession() as session:
         url = f"ws://127.0.0.1:9119{request.path_qs}"
-        async with session.ws_connect(url) as ws_upstream:
+        # Forward the client's cookies (including the upstream-minted session cookie) to upstream
+        cookies_header = "; ".join(f"{k}={v}" for k, v in request.cookies.items())
+        headers = {}
+        if cookies_header:
+            headers["Cookie"] = cookies_header
+        async with session.ws_connect(url, headers=headers) as ws_upstream:
 
             async def forward(src, dst):
                 async for msg in src:
@@ -387,7 +317,6 @@ async def proxy_ws(request):
                     elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                         break
 
-            import asyncio
             await asyncio.gather(
                 forward(ws_client, ws_upstream),
                 forward(ws_upstream, ws_client),
@@ -402,7 +331,10 @@ async def proxy(request):
 
     async with ClientSession() as session:
         url = f"{UPSTREAM}{request.path_qs}"
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "transfer-encoding")}
+        headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "transfer-encoding", "cookie")}
+        # Forward cookies explicitly
+        if request.cookies:
+            headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in request.cookies.items())
 
         body = await request.read()
         async with session.request(
@@ -432,7 +364,7 @@ async def on_startup(app):
 
 
 def create_app():
-    app = web.Application(middlewares=[auth_middleware])
+    app = web.Application(middlewares=[pass_through_middleware])
     app.on_startup.append(on_startup)
     app.router.add_get("/login", login_page)
     app.router.add_post("/login", login_post)
