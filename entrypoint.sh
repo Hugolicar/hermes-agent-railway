@@ -52,6 +52,27 @@ if [ "$AUTO_UPDATE" = "true" ]; then
   fi
 fi
 
+# Apply cookie_patch.py over the upstream cookies.py BEFORE supervisord
+# brings the dashboard up. This must run AFTER any auto-update git pull
+# (the upstream cookies.py may have just been refreshed) and BEFORE
+# the dashboard is started. The patch reads HERMES_AUTH_COOKIE_SAMESITE
+# at import time, so it's a no-op if the env var isn't set.
+patch_cookies() {
+  local src="/cookie_patch.py"
+  local dst="/opt/hermes-agent/hermes_cli/dashboard_auth/cookies.py"
+  if [ ! -f "$src" ]; then
+    echo "[patch_cookies] no patch source at $src; skipping"
+    return 0
+  fi
+  if cmp -s "$src" "$dst" 2>/dev/null; then
+    echo "[patch_cookies] already patched (identical to upstream install)"
+    return 0
+  fi
+  echo "[patch_cookies] applying cookie_patch.py -> $dst"
+  cp "$src" "$dst"
+}
+patch_cookies
+
 # Single volume setup: everything under /root/.hermes
 # Create data subdir for File Browser and set as working directory
 mkdir -p /root/.hermes/data
