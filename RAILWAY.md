@@ -105,6 +105,56 @@ O File Browser reinicia automaticamente com autenticação habilitada.
 - [Telegram BotFather](https://t.me/BotFather) (for Telegram setup)
 - [OpenRouter](https://openrouter.ai/) (recommended LLM provider)
 
+## Optional: Connect Hermes Desktop over Tailscale
+
+Hermes Desktop (and the TUI client) can talk directly to the dashboard
+over a private Tailscale network instead of going through the public
+HTTPS proxy. This skips the OAuth round-trip entirely — the Desktop
+authenticates with HTTP Basic over the tailnet, and the dashboard's
+auth gate (only on non-loopback binds) accepts the connection.
+
+**Why?** The public HTTPS proxy requires a working browser-side
+OAuth/cookie flow. Some privacy-protective browsers (Safari ITP,
+Brave Shields, Firefox ETP-strict) block the PKCE cookie on the
+cross-site callback redirect, leaving basic auth as the only
+working browser login. Tailscale bypasses all of that because the
+Desktop connects to a private IP, not to a public HTTPS origin.
+
+**How to set it up:**
+
+1. Sign in to [Tailscale](https://tailscale.com/) (free for up to
+   100 devices, more than enough).
+2. Install Tailscale on the machine where Hermes Desktop runs, and
+   sign in to the same account.
+3. Generate a reusable auth key at
+   https://login.tailscale.com/admin/settings/keys
+   - Check **"Reusable"** so the same key can register the
+     Railway node every time the container restarts.
+   - Set an **expiry** (default 90 days, max 180). The container
+     will stop connecting when the key expires — generate a new
+     one and update the Railway env var.
+   - **Do not commit the key to git.** Treat it like any other
+     secret.
+4. In the Railway service, add two env vars:
+   - `TS_AUTHKEY` = the auth key from step 3
+   - `TS_HOSTNAME` (optional) = the name that will show up in
+     `tailscale status`. Defaults to `hugoloc-railway`.
+5. Trigger a redeploy. The new image installs Tailscale during
+   `docker build`; the entrypoint starts `tailscaled` in
+   userspace mode and runs `tailscale up` automatically. The
+   container log will print `[tailscale] online. Tailnet IPv4:
+   100.x.y.z`.
+6. In Hermes Desktop, point the dashboard URL at
+   `http://100.x.y.z:9119` (the Tailscale IPv4, NOT 8080 — the
+   Tailscale connection is direct to the upstream dashboard and
+   bypasses the public `auth_proxy.py`). Provide your basic-auth
+   username and password in the Desktop's connection settings.
+
+**Optional: enable Tailscale SSH access to the container** by
+changing `--ssh=false` to `--ssh=true` in `entrypoint.sh`. Off by
+default because the container runs as root and the auth gate is
+the only thing protecting the dashboard.
+
 ## Why Use Railway?
 
 Railway is a singular platform to deploy your infrastructure stack. Railway will host your infrastructure so you don't have to deal with configuration, while allowing you to vertically and horizontally scale it.

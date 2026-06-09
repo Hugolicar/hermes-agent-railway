@@ -11,6 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:$PATH"
 
+# Install Tailscale (userspace networking mode - no /dev/net/tun needed,
+# no privileged container required). Official install script from
+# tailscale.com. We pin to a recent stable version; bump as needed.
+ARG TAILSCALE_VERSION=1.78.1
+RUN curl -fsSL "https://pkgs.tailscale.com/stable/tailscale_${TAILSCALE_VERSION}_amd64.tgz" -o /tmp/tailscale.tgz \
+    && tar -xzf /tmp/tailscale.tgz -C /tmp \
+    && mv /tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscaled /usr/local/bin/tailscaled \
+    && mv /tmp/tailscale_${TAILSCALE_VERSION}_amd64/tailscale /usr/local/bin/tailscale \
+    && rm -rf /tmp/tailscale.tgz /tmp/tailscale_${TAILSCALE_VERSION}_amd64 \
+    && chmod +x /usr/local/bin/tailscale /usr/local/bin/tailscaled \
+    && tailscale version
+
 # Install File Browser (official binary)
 RUN curl -fsSL https://raw.githubusercontent.com/filebrowser/get/master/get.sh | bash \
     && filebrowser version
