@@ -162,6 +162,16 @@ async def upstream_login(request):
     registered, so we let it render the provider picker. We follow the
     upstream's redirect (if any) and forward the final HTML back to the
     browser untouched, except for the standard gateway-widget injection.
+
+    NOTE: as of the ``fix/disable-nous-provider-ui`` branch, we also
+    strip the Nous Research OAuth button from the picker HTML. The
+    Nous provider is still registered upstream and the PKCE/cookie
+    samesite patch is in place, but the Portal round-trip is failing
+    on the callback in this environment (root cause still under
+    investigation). Until that is resolved the basic-auth provider
+    is the only working login path, so we hide the broken button
+    to avoid confusing users. Revert this block + the
+    ``_nous_blocked`` handler in :func:`proxy` to re-enable Nous.
     """
     async with ClientSession() as session:
         url = f"{UPSTREAM}/login"
@@ -190,6 +200,13 @@ async def upstream_login(request):
                 content_type = resp.headers.get("content-type", "")
                 if "text/html" in content_type:
                     html = content.decode("utf-8", errors="replace")
+                    # Strip the Nous OAuth button. The upstream renders
+                    # the provider picker as a flat list of
+                    # <a class="provider-btn" href="/auth/login?provider=...">
+                    # anchors; we remove the Nous one plus any trailing
+                    # whitespace/newline so the layout still looks clean
+                    # with only the basic-auth form remaining.
+                    html = _strip_provider_button(html, "nous")
                     html = html.replace("</body>", GATEWAY_WIDGET + "</body>")
                     return web.Response(
                         status=resp.status,
@@ -201,6 +218,29 @@ async def upstream_login(request):
         except Exception as e:
             print(f"[auth_proxy] upstream /login fetch failed: {e}", file=sys.stderr)
             raise web.HTTPFound("/login?error=1")
+
+
+import re as _re
+
+_NOUS_BTN_RE = _re.compile(
+    r'<a\b[^>]*class="provider-btn"[^>]*href="[^"]*provider=nous[^"]*"[^>]*>.*?</a>\s*',
+    _re.DOTALL | _re.IGNORECASE,
+)
+
+
+def _strip_provider_button(html: str, provider_name: str) -> str:
+    """Remove a provider's button anchor from an upstream login page.
+
+    The upstream emits a flat list of provider buttons; we use a
+    conservative regex that matches the exact anchor shape used in
+    the picker (one anchor per provider, no nested anchors). If the
+    shape ever changes upstream the regex will silently no-op,
+    which is the safer failure mode (the broken button reappears
+    but the basic flow still works).
+    """
+    if provider_name == "nous":
+        return _NOUS_BTN_RE.sub("", html)
+    return html
 
 
 async def logout(request):
@@ -405,9 +445,28 @@ async def proxy_ws(request):
 
 
 async def proxy(request):
-    """HTTP pass-through with cookie + forwarded-headers forwarding."""
+    """HTTP pass-through with cookie + forwarded-headers forwarding.
+
+    The Nous OAuth provider is currently disabled in this deploy (see
+    :func:`upstream_login` for the rationale). Any direct request to
+    ``/auth/login?provider=nous`` is short-circuited to a 404 so
+    bookmarked links or stale tabs don't 302 the user into a broken
+    Portal round-trip.
+    """
     if request.headers.get("Upgrade", "").lower() == "websocket":
         return await proxy_ws(request)
+
+    # Short-circuit Nous login attempts. We match on the query string
+    # instead of the path because the upstream route is ``/auth/login``
+    # (no provider segment) and the provider is selected via ``?provider=``.
+    if request.method == "GET" and request.path == "/auth/login" and \
+       request.query.get("provider", "").lower() == "nous":
+        return web.Response(
+            status=404,
+            text="Nous Research OAuth login is temporarily disabled in this "
+                 "deploy. Use the Username & Password form on the login page.",
+            content_type="text/plain",
+        )
 
     async with ClientSession() as session:
         url = f"{UPSTREAM}{request.path_qs}"
