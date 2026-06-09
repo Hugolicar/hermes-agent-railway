@@ -108,3 +108,20 @@ O File Browser reinicia automaticamente com autenticação habilitada.
 ## Why Use Railway?
 
 Railway is a singular platform to deploy your infrastructure stack. Railway will host your infrastructure so you don't have to deal with configuration, while allowing you to vertically and horizontally scale it.
+
+
+## Recent change: dashboard auth delegates to Hermes basic provider
+
+The auth proxy no longer maintains its own session cookie. It now passes the request to the upstream Hermes dashboard, which handles the basic provider (username + password) and mints its own session cookie. The proxy only renders a custom-branded login page; the resulting cookie is honored by the upstream at `/api/ws`, so a single sign-in covers both the browser dashboard and a remote Hermes Desktop.
+
+### Migration steps (one-time, when upgrading an existing deployment)
+
+1. **Rename** the `DASHBOARD_USER` env var to `HERMES_DASHBOARD_BASIC_AUTH_USERNAME` (same value).
+2. **Rename** `DASHBOARD_PASSWORD` to `HERMES_DASHBOARD_BASIC_AUTH_PASSWORD` (same value).
+3. **Add** a new `HERMES_DASHBOARD_BASIC_AUTH_SECRET` env var, set to a random 32+ byte base64 string (run `openssl rand -base64 32`). This is the HMAC signing key for upstream sessions — set it to a stable value so sessions survive redeploys.
+4. **Redeploy** the Railway service. After ~30-60s, validate:
+   ```bash
+   curl -sS https://<your-domain>/api/status | jq '.auth_required, .auth_providers'
+   # expected: true / [ "basic" ]
+   ```
+5. **Sign in once** at `https://<your-domain>/login`. The browser cookie is now an upstream-minted session token, reused by the WebSocket for `/api/ws` — so Hermes Desktop (Settings -> Gateway -> Remote gateway) will work without a second sign-in.
