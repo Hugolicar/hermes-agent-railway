@@ -1,45 +1,46 @@
 #!/usr/bin/env python3
-"""Cookie-based auth proxy for Hermes dashboard on Railway."""
+"""Auth-aware delegate proxy for Hermes dashboard on Railway.
 
-import hashlib
-import hmac
+DELEGATE PATTERN (jun 2026): this proxy does NOT validate credentials
+locally and does NOT mint its own session cookie. It is a thin
+pass-through to the upstream dashboard (:9119), which runs the basic
+auth provider configured via HERMES_DASHBOARD_BASIC_AUTH_* env vars.
+The proxy's only job is:
+
+  1. Serve a branded landing page at /login.
+  2. Render a "Continue to sign in" link that points to /upstream-login,
+     which GETs the upstream's actual /login (the real provider picker).
+  3. Forward the browser's session cookies to the upstream on every
+     HTTP and WebSocket request (the upstream is the auth gate).
+  4. Inject X-Forwarded-Proto: https + X-Forwarded-Host on every
+     proxied request so the upstream's detect_https() mints Secure
+     __Host- prefixed cookies that the browser will accept over
+     the public HTTPS Railway front.
+
+The upstream is the source of truth for which providers are registered
+(basic, nous, or both). The proxy never re-implements the picker or
+validates credentials — those were the two bugs in the previous version
+that caused a 302 redirect loop on /login and 401s on /api/status.
+
+Reference: hermes-remote-dashboard-connection/templates/auth_proxy_delegate.py
+"""
+
+import asyncio
 import os
-import secrets
 import string
 import subprocess
 import sys
-import time
 
-from aiohttp import web, ClientSession, WSMsgType
+from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 
 HERMES_HOME = "/root/.hermes"
 UPSTREAM = "http://127.0.0.1:9119"
-USERNAME = os.environ.get("DASHBOARD_USER", "admin")
-PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
-SECRET = secrets.token_bytes(32)
-COOKIE = "hermes_auth"
-MAX_AGE = 7 * 86400
 
-if not PASSWORD:
-    print("ERROR: DASHBOARD_PASSWORD must be set.", file=sys.stderr)
-    sys.exit(1)
-
-
-def make_token():
-    expires = str(int(time.time()) + MAX_AGE)
-    sig = hmac.new(SECRET, expires.encode(), hashlib.sha256).hexdigest()
-    return f"{expires}.{sig}"
-
-
-def check_token(token):
-    try:
-        expires, sig = token.rsplit(".", 1)
-        if int(expires) < time.time():
-            return False
-        expected = hmac.new(SECRET, expires.encode(), hashlib.sha256).hexdigest()
-        return hmac.compare_digest(sig, expected)
-    except Exception:
-        return False
+# Public scheme/host the upstream is reached under. Used to populate
+# X-Forwarded-Proto and X-Forwarded-Host so the upstream can decide
+# the right cookie hardening (Secure flag, __Host- prefix).
+PUBLIC_SCHEME = os.environ.get("HERMES_DASHBOARD_PUBLIC_SCHEME", "https").strip() or "https"
+PUBLIC_HOST = os.environ.get("HERMES_DASHBOARD_PUBLIC_HOST", "hugoloc.click").strip()
 
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -216,6 +217,17 @@ LOGIN_HTML = """<!DOCTYPE html>
     margin-bottom: 1.25rem;
     text-align: center;
   }
+  a.continue {
+    display: block; text-align: center; text-decoration: none;
+    width: 100%; padding: 0.8rem; margin-top: 0.5rem;
+    background: var(--accent); color: var(--bg); border: none; border-radius: 8px;
+    font-family: 'DM Sans', sans-serif; font-size: 0.85rem; font-weight: 500;
+    letter-spacing: 0.06em; text-transform: uppercase; cursor: pointer;
+    transition: transform 0.2s, opacity 0.2s;
+  }
+  a.continue:hover { opacity: 0.88; transform: translateY(-1px); }
+  a.continue:active { transform: translateY(0); }
+  .meta { margin-top: 1.5rem; font-size: 0.7rem; color: var(--text-muted); text-align: center; letter-spacing: 0.04em; }
 </style>
 </head>
 <body>
@@ -228,17 +240,8 @@ LOGIN_HTML = """<!DOCTYPE html>
   <div class="divider"></div>
   <div class="card">
     $error
-    <form method="POST" action="/login">
-      <div class="field">
-        <label for="username">Username</label>
-        <input id="username" name="username" type="text" autocomplete="username" required>
-      </div>
-      <div class="field">
-        <label for="password">Password</label>
-        <input id="password" name="password" type="password" autocomplete="current-password" required>
-      </div>
-      <button type="submit">Continue</button>
-    </form>
+    <a class="continue" href="/upstream-login">Continue to sign in</a>
+    <p class="meta">Sign-in is handled by the configured providers (basic auth, Nous Research, or both).</p>
   </div>
 </div>
 </body>
@@ -246,45 +249,107 @@ LOGIN_HTML = """<!DOCTYPE html>
 
 
 async def login_page(request):
+    """Custom-branded login landing.
+
+    Renders a 'Continue to sign in' link to /upstream-login, which
+    proxies to the upstream's real /login page where the actual
+    provider picker (basic, nous, or both) lives.
+    """
     error = ""
     if request.query.get("error"):
-        error = '<div class="error">Invalid username or password</div>'
+        error = '<div class="error">Sign-in failed. Please try again.</div>'
     return web.Response(
         text=string.Template(LOGIN_HTML).safe_substitute(error=error),
         content_type="text/html",
     )
 
 
-async def login_post(request):
-    data = await request.post()
-    username = data.get("username", "")
-    password = data.get("password", "")
+async def upstream_login(request):
+    """Pass-through to the upstream's /login page.
 
-    if hmac.compare_digest(username, USERNAME) and hmac.compare_digest(password, PASSWORD):
-        resp = web.HTTPFound("/")
-        resp.set_cookie(COOKIE, make_token(), max_age=MAX_AGE, httponly=True, samesite="Lax")
-        return resp
-
-    raise web.HTTPFound("/login?error=1")
+    The upstream is the source of truth for which providers are
+    registered, so we let it render the provider picker. We forward
+    X-Forwarded-Proto and X-Forwarded-Host so the upstream emits
+    session cookies whose Secure/__Host- prefix depends on the
+    public request scheme, not the internal loopback scheme.
+    """
+    async with ClientSession() as session:
+        url = f"{UPSTREAM}/login"
+        if request.query_string:
+            url = f"{url}?{request.query_string}"
+        headers = {
+            k: v for k, v in request.headers.items()
+            if k.lower() not in ("host", "transfer-encoding")
+        }
+        headers["X-Forwarded-Proto"] = PUBLIC_SCHEME
+        if PUBLIC_HOST:
+            headers["X-Forwarded-Host"] = PUBLIC_HOST
+        try:
+            async with session.get(
+                url,
+                headers=headers,
+                allow_redirects=True,
+                timeout=ClientTimeout(total=10),
+            ) as resp:
+                content = await resp.read()
+                excluded = {"transfer-encoding", "content-encoding", "content-length"}
+                proxy_headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
+                content_type = resp.headers.get("content-type", "")
+                if "text/html" in content_type:
+                    html = content.decode("utf-8", errors="replace")
+                    html = html.replace("</body>", GATEWAY_WIDGET + "</body>")
+                    return web.Response(
+                        status=resp.status,
+                        headers={k: v for k, v in proxy_headers.items() if k.lower() != "content-type"},
+                        text=html,
+                        content_type="text/html",
+                    )
+                return web.Response(status=resp.status, headers=proxy_headers, body=content)
+        except Exception as e:
+            print(f"[auth_proxy] upstream /login fetch failed: {e}", file=sys.stderr)
+            raise web.HTTPFound("/login?error=1")
 
 
 async def logout(request):
+    """Forward logout to upstream, then bounce the browser back to /login."""
+    async with ClientSession() as session:
+        try:
+            cookies_header = "; ".join(f"{k}={v}" for k, v in request.cookies.items())
+            headers = {}
+            if cookies_header:
+                headers["Cookie"] = cookies_header
+            headers["X-Forwarded-Proto"] = PUBLIC_SCHEME
+            if PUBLIC_HOST:
+                headers["X-Forwarded-Host"] = PUBLIC_HOST
+            await session.post(
+                f"{UPSTREAM}/auth/logout",
+                headers=headers,
+                cookies={k: v for k, v in request.cookies.items()},
+                allow_redirects=False,
+                timeout=ClientTimeout(total=5),
+            )
+        except Exception:
+            pass
     resp = web.HTTPFound("/login")
-    resp.del_cookie(COOKIE)
+    # Best-effort clear every plausible session cookie name. The upstream
+    # uses prefix variants (__Host-, __Secure-, bare).
+    for name in (
+        "hermes_session_at",
+        "hermes_session_rt",
+        "hermes_session_pkce",
+        "__Host-hermes_session_at",
+        "__Host-hermes_session_rt",
+        "__Secure-hermes_session_at",
+        "__Secure-hermes_session_rt",
+    ):
+        resp.del_cookie(name, path="/")
     return resp
 
 
+# -- Pass-through middleware: no auth gating here. Upstream handles it. --
+
 @web.middleware
-async def auth_middleware(request, handler):
-    if request.path in ("/login", "/logout", "/api/health"):
-        return await handler(request)
-
-    token = request.cookies.get(COOKIE)
-    if not token or not check_token(token):
-        if request.path.startswith("/api/"):
-            raise web.HTTPUnauthorized()
-        raise web.HTTPFound("/login")
-
+async def pass_through_middleware(request, handler):
     return await handler(request)
 
 
@@ -370,13 +435,51 @@ async def health(request):
     return web.json_response({"status": "ok"})
 
 
+def _upstream_headers(request):
+    """Build the header dict for an upstream request.
+
+    Drops ``Host`` (would be the proxy's 127.0.0.1) and
+    ``Transfer-Encoding`` (let aiohttp re-add it). Adds:
+
+    * ``X-Forwarded-Proto`` -- the upstream needs this to decide whether
+      to set the ``Secure`` cookie flag. Without it the upstream thinks
+      the request is plain HTTP and refuses to set Secure cookies the
+      browser will accept over the public HTTPS front.
+    * ``X-Forwarded-Host`` -- mirrors the public origin so PKCE redirect
+      URIs and cookie ``Domain`` attributes resolve correctly.
+    * ``Cookie`` -- the browser's session cookies. The upstream is the
+      auth gate; without this forward it would never see the session
+      the user just established and would 401 in a loop.
+    """
+    headers = {
+        k: v for k, v in request.headers.items()
+        if k.lower() not in ("host", "transfer-encoding")
+    }
+    headers["X-Forwarded-Proto"] = PUBLIC_SCHEME
+    if PUBLIC_HOST:
+        headers["X-Forwarded-Host"] = PUBLIC_HOST
+    if request.cookies:
+        headers["Cookie"] = "; ".join(f"{k}={v}" for k, v in request.cookies.items())
+    return headers
+
+
 async def proxy_ws(request):
+    """WebSocket pass-through with cookie forwarding.
+
+    The upstream's /api/ws rejects unauthenticated upgrades with close
+    code 4401 in gated mode. The Desktop client authenticates by first
+    calling POST /api/auth/ws-ticket (which uses the session cookies) and
+    then connecting with ?ticket=... — so the cookies don't strictly
+    have to ride on the WS upgrade itself. But forwarding them is
+    harmless and keeps the proxy uniform with the HTTP path.
+    """
     ws_client = web.WebSocketResponse()
     await ws_client.prepare(request)
 
     async with ClientSession() as session:
         url = f"ws://127.0.0.1:9119{request.path_qs}"
-        async with session.ws_connect(url) as ws_upstream:
+        upstream_headers = _upstream_headers(request)
+        async with session.ws_connect(url, headers=upstream_headers) as ws_upstream:
 
             async def forward(src, dst):
                 async for msg in src:
@@ -387,7 +490,6 @@ async def proxy_ws(request):
                     elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
                         break
 
-            import asyncio
             await asyncio.gather(
                 forward(ws_client, ws_upstream),
                 forward(ws_upstream, ws_client),
@@ -397,12 +499,13 @@ async def proxy_ws(request):
 
 
 async def proxy(request):
+    """HTTP pass-through with cookie + forwarded-headers forwarding."""
     if request.headers.get("Upgrade", "").lower() == "websocket":
         return await proxy_ws(request)
 
     async with ClientSession() as session:
         url = f"{UPSTREAM}{request.path_qs}"
-        headers = {k: v for k, v in request.headers.items() if k.lower() not in ("host", "transfer-encoding")}
+        headers = _upstream_headers(request)
 
         body = await request.read()
         async with session.request(
@@ -410,6 +513,7 @@ async def proxy(request):
             url,
             headers=headers,
             data=body,
+            cookies=dict(request.cookies),
             allow_redirects=False,
         ) as resp:
             excluded = {"transfer-encoding", "content-encoding", "content-length"}
@@ -432,10 +536,15 @@ async def on_startup(app):
 
 
 def create_app():
-    app = web.Application(middlewares=[auth_middleware])
+    # No auth_middleware. The upstream dashboard runs its own auth
+    # gate (gated mode engages on non-loopback binds). The proxy is
+    # transparent: it forwards the browser's session cookies, sets
+    # X-Forwarded-Proto so the upstream emits Secure cookies, and
+    # lets the upstream decide.
+    app = web.Application(middlewares=[pass_through_middleware])
     app.on_startup.append(on_startup)
     app.router.add_get("/login", login_page)
-    app.router.add_post("/login", login_post)
+    app.router.add_get("/upstream-login", upstream_login)
     app.router.add_get("/logout", logout)
     app.router.add_get("/api/health", health)
     app.router.add_post("/api/gateway/restart", restart_gateway)
