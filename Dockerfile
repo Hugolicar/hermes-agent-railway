@@ -1,8 +1,16 @@
 FROM python:3.11-slim
 
-# Install system dependencies + supervisord + nodejs
+# Install system dependencies + supervisord + nodejs + tini
+#
+# `tini` is registered as PID 1 and forwards signals to children + reaps
+# zombies. supervisord (PID 2) still orchestrates the long-lived services
+# (hermes-dashboard, auth-proxy, filebrowser), but tini sits in front and
+# fixes the memory leak where subprocesses spawned by the hermes agent loop
+# were reparented to supervisord without a SIGCHLD handler, accumulating as
+# "reaped unknown pid" rows in supervisord logs and holding RAM until the
+# container restarted. Reference: https://github.com/krallin/tini
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl ca-certificates ripgrep ffmpeg supervisor \
+    git curl ca-certificates ripgrep ffmpeg supervisor tini \
     && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
@@ -51,4 +59,8 @@ RUN chmod +x /entrypoint.sh
 # Create File Browser database directory
 RUN mkdir -p /app/data /var/lib/filebrowser
 
-ENTRYPOINT ["/entrypoint.sh"]
+# Tini as PID 1: forwards signals (SIGTERM/SIGINT) to supervisord, reaps
+# zombie processes spawned by the hermes agent loop. Without this the
+# container PID 1 is supervisord, which doesn't always wait() on children
+# reparented to it, leading to leaked subprocesses + memory growth.
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
