@@ -154,4 +154,14 @@ ln -sf /root/.hermes/data /app/data
 # - hermes dashboard (port 9119)
 # - auth proxy (port 8080)
 # - filebrowser (port 8081)
-exec /usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf
+#
+# IMPORTANT: do NOT use `exec` here. With `exec`, the supervisord binary
+# replaces the shell (PID 2) and becomes PID 1 itself, which defeats
+# tini (PID 1, registered via ENTRYPOINT in the Dockerfile) — tini loses
+# its position as the init/signal-handler/reaper. Running supervisord
+# WITHOUT `exec` keeps it as a child of the shell, which is itself a
+# child of tini — tini stays PID 1, forwards SIGTERM on shutdown, and
+# reaps orphan subprocesses from the hermes agent loop.
+
+# Start supervisord (NOT via `exec`) so tini stays PID 1.
+/usr/bin/supervisord -n -c /etc/supervisor/conf.d/supervisord.conf
