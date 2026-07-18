@@ -32,6 +32,7 @@ import subprocess
 import sys
 
 from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
+from multidict import CIMultiDict
 
 HERMES_HOME = "/root/.hermes"
 UPSTREAM = "http://127.0.0.1:9119"
@@ -41,6 +42,26 @@ UPSTREAM = "http://127.0.0.1:9119"
 # the right cookie hardening (Secure flag, __Host- prefix).
 PUBLIC_SCHEME = os.environ.get("HERMES_DASHBOARD_PUBLIC_SCHEME", "https").strip() or "https"
 PUBLIC_HOST = os.environ.get("HERMES_DASHBOARD_PUBLIC_HOST", "hugoloc.click").strip()
+
+
+def _copy_upstream_response_headers(response, *, drop_content_type=False):
+    """Copy upstream headers without collapsing repeated Set-Cookie values.
+
+    ``aiohttp`` stores headers in a multi-dict. Converting that object to a
+    regular ``dict`` silently keeps only the final value for duplicate names.
+    Authentication responses intentionally emit several ``Set-Cookie``
+    headers (access token, refresh token, provider hint, PKCE cleanup), so
+    collapsing them produces a valid-looking login response with an unusable
+    session. Preserve the multi-value shape all the way to the browser.
+    """
+    excluded = {"transfer-encoding", "content-encoding", "content-length"}
+    if drop_content_type:
+        excluded.add("content-type")
+    headers = CIMultiDict()
+    for key, value in response.headers.items():
+        if key.lower() not in excluded:
+            headers.add(key, value)
+    return headers
 
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -292,19 +313,21 @@ async def upstream_login(request):
                 timeout=ClientTimeout(total=10),
             ) as resp:
                 content = await resp.read()
-                excluded = {"transfer-encoding", "content-encoding", "content-length"}
-                proxy_headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
                 content_type = resp.headers.get("content-type", "")
                 if "text/html" in content_type:
                     html = content.decode("utf-8", errors="replace")
                     html = html.replace("</body>", GATEWAY_WIDGET + "</body>")
                     return web.Response(
                         status=resp.status,
-                        headers={k: v for k, v in proxy_headers.items() if k.lower() != "content-type"},
+                        headers=_copy_upstream_response_headers(resp, drop_content_type=True),
                         text=html,
                         content_type="text/html",
                     )
-                return web.Response(status=resp.status, headers=proxy_headers, body=content)
+                return web.Response(
+                    status=resp.status,
+                    headers=_copy_upstream_response_headers(resp),
+                    body=content,
+                )
         except Exception as e:
             print(f"[auth_proxy] upstream /login fetch failed: {e}", file=sys.stderr)
             raise web.HTTPFound("/login?error=1")
@@ -516,19 +539,25 @@ async def proxy(request):
             cookies=dict(request.cookies),
             allow_redirects=False,
         ) as resp:
-            excluded = {"transfer-encoding", "content-encoding", "content-length"}
-            proxy_headers = {k: v for k, v in resp.headers.items() if k.lower() not in excluded}
             content = await resp.read()
             if (request.method, request.path) in RESTART_PATHS and resp.status < 400:
                 start_gateway()
 
             content_type = resp.headers.get("content-type", "")
             if "text/html" in content_type:
-                html_headers = {k: v for k, v in proxy_headers.items() if k.lower() != "content-type"}
                 html = content.decode("utf-8", errors="replace")
                 html = html.replace("</body>", GATEWAY_WIDGET + "</body>")
-                return web.Response(status=resp.status, headers=html_headers, text=html, content_type="text/html")
-            return web.Response(status=resp.status, headers=proxy_headers, body=content)
+                return web.Response(
+                    status=resp.status,
+                    headers=_copy_upstream_response_headers(resp, drop_content_type=True),
+                    text=html,
+                    content_type="text/html",
+                )
+            return web.Response(
+                status=resp.status,
+                headers=_copy_upstream_response_headers(resp),
+                body=content,
+            )
 
 
 async def on_startup(app):
