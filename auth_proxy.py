@@ -30,9 +30,17 @@ import os
 import string
 import subprocess
 import sys
+from contextlib import suppress
+from pathlib import Path
 
 from aiohttp import web, ClientSession, ClientTimeout, WSMsgType
 from multidict import CIMultiDict
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from profile_gateway_control import ProfileGatewayController
 
 HERMES_HOME = "/root/.hermes"
 UPSTREAM = "http://127.0.0.1:9119"
@@ -42,6 +50,16 @@ UPSTREAM = "http://127.0.0.1:9119"
 # the right cookie hardening (Secure flag, __Host- prefix).
 PUBLIC_SCHEME = os.environ.get("HERMES_DASHBOARD_PUBLIC_SCHEME", "https").strip() or "https"
 PUBLIC_HOST = os.environ.get("HERMES_DASHBOARD_PUBLIC_HOST", "hugoloc.click").strip()
+
+# This deployment deliberately supports only explicitly registered profiles.
+# Never construct a shell command from request input.
+PROFILE_GATEWAY_CONTROLLERS = {
+    "rafapessoal": ProfileGatewayController(
+        profile="rafapessoal",
+        profile_home=Path(HERMES_HOME) / "profiles" / "rafapessoal",
+        command=["hermes", "-p", "rafapessoal", "gateway", "run"],
+    ),
+}
 
 
 def _copy_upstream_response_headers(response, *, drop_content_type=False):
@@ -414,6 +432,61 @@ async def gateway_status(request):
     })
 
 
+async def _dashboard_session_authenticated(request):
+    """Ask the protected upstream Profiles API to validate this session."""
+    if not request.cookies:
+        return False
+    try:
+        async with ClientSession() as session:
+            async with session.get(
+                f"{UPSTREAM}/api/profiles",
+                headers=_upstream_headers(request),
+                cookies=dict(request.cookies),
+                allow_redirects=False,
+                timeout=ClientTimeout(total=5),
+            ) as response:
+                return response.status == 200
+    except Exception as exc:
+        print(f"[auth_proxy] session validation failed: {exc}", file=sys.stderr)
+        return False
+
+
+async def profile_gateway_status(request):
+    if not await _dashboard_session_authenticated(request):
+        raise web.HTTPUnauthorized(text="Authentication required")
+    controller = PROFILE_GATEWAY_CONTROLLERS.get(request.match_info["profile"])
+    if controller is None:
+        raise web.HTTPNotFound(text="Profile gateway is not managed here")
+    return web.json_response(await asyncio.to_thread(controller.status))
+
+
+async def profile_gateway_action(request):
+    if not await _dashboard_session_authenticated(request):
+        raise web.HTTPUnauthorized(text="Authentication required")
+    controller = PROFILE_GATEWAY_CONTROLLERS.get(request.match_info["profile"])
+    if controller is None:
+        raise web.HTTPNotFound(text="Profile gateway is not managed here")
+    action = request.match_info["action"]
+    if action not in {"start", "stop", "restart"}:
+        raise web.HTTPNotFound(text="Unknown gateway action")
+    result = await asyncio.to_thread(getattr(controller, action))
+    return web.json_response(result)
+
+
+async def _profile_gateway_monitor(app):
+    while True:
+        for controller in PROFILE_GATEWAY_CONTROLLERS.values():
+            try:
+                await asyncio.to_thread(controller.reconcile)
+            except Exception as exc:
+                print(
+                    f"[auth_proxy] profile gateway monitor failed for "
+                    f"{controller.profile}: {exc}",
+                    file=sys.stderr,
+                )
+        await asyncio.sleep(10)
+
+
 GATEWAY_WIDGET = """
 <div id="gw-widget" style="position:fixed;bottom:20px;right:20px;z-index:99999;
   font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:13px;">
@@ -425,6 +498,19 @@ GATEWAY_WIDGET = """
       <span id="gw-label" style="color:#7899aa;flex:1;">Gateway</span>
       <button id="gw-btn" onclick="gwRestart()" style="background:#2dd4bf;color:#0a0f14;border:none;
         border-radius:5px;padding:4px 12px;font-size:12px;font-weight:600;cursor:pointer;">Restart</button>
+    </div>
+    <div id="rafa-gw-row" style="display:none;padding-top:8px;border-top:1px solid rgba(45,212,191,0.1);">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:7px;">
+        <span id="rafa-gw-dot" style="width:8px;height:8px;border-radius:50%;background:#888;flex-shrink:0;"></span>
+        <span id="rafa-gw-label" style="color:#7899aa;flex:1;">Rafaela</span>
+        <span id="rafa-gw-pid" style="color:#526b78;font-size:10px;"></span>
+      </div>
+      <div style="display:flex;gap:5px;">
+        <button id="rafa-gw-start" onclick="rafaGatewayAction('start')" style="flex:1;background:#2dd4bf;color:#0a0f14;border:none;border-radius:5px;padding:4px 7px;font-size:11px;font-weight:600;cursor:pointer;">Start</button>
+        <button id="rafa-gw-stop" onclick="rafaGatewayAction('stop')" style="flex:1;background:#ef4444;color:white;border:none;border-radius:5px;padding:4px 7px;font-size:11px;font-weight:600;cursor:pointer;">Stop</button>
+        <button id="rafa-gw-restart" onclick="rafaGatewayAction('restart')" style="flex:1;background:#334155;color:#e2e8f0;border:none;border-radius:5px;padding:4px 7px;font-size:11px;font-weight:600;cursor:pointer;">Restart</button>
+      </div>
+      <div id="rafa-gw-error" style="display:none;color:#fca5a5;font-size:10px;margin-top:6px;max-width:230px;"></div>
     </div>
     <div id="gw-vol" style="display:none;font-size:11px;padding-top:4px;border-top:1px solid rgba(45,212,191,0.1);"></div>
   </div>
@@ -449,7 +535,42 @@ function gwRestart(){
     setTimeout(()=>{b.textContent='Restart';b.disabled=false;gwStatus();},3000);
   }).catch(()=>{b.textContent='Restart';b.disabled=false;});
 }
-gwStatus();setInterval(gwStatus,10000);
+function rafaGatewayButtons(disabled){
+  ['rafa-gw-start','rafa-gw-stop','rafa-gw-restart'].forEach(function(id){
+    var button=document.getElementById(id);if(button)button.disabled=disabled;
+  });
+}
+function rafaGatewayRender(d){
+  var row=document.getElementById('rafa-gw-row');row.style.display='block';
+  document.getElementById('rafa-gw-dot').style.background=d.running?'#4ade80':'#ef4444';
+  document.getElementById('rafa-gw-label').textContent=d.running?'Rafaela running':'Rafaela stopped';
+  document.getElementById('rafa-gw-pid').textContent=d.pid?'PID '+d.pid:'';
+  document.getElementById('rafa-gw-start').disabled=d.running;
+  document.getElementById('rafa-gw-stop').disabled=!d.running;
+  document.getElementById('rafa-gw-restart').disabled=!d.running;
+  var error=document.getElementById('rafa-gw-error');
+  if(d.last_error){error.style.display='block';error.textContent=d.last_error;}
+  else{error.style.display='none';error.textContent='';}
+}
+function rafaGatewayStatus(){
+  fetch('/api/profile-gateways/rafapessoal/status').then(function(response){
+    if(response.status===401){document.getElementById('rafa-gw-row').style.display='none';return null;}
+    if(!response.ok)throw new Error('Status '+response.status);
+    return response.json();
+  }).then(function(data){if(data)rafaGatewayRender(data);}).catch(function(){});
+}
+function rafaGatewayAction(action){
+  rafaGatewayButtons(true);
+  var error=document.getElementById('rafa-gw-error');error.style.display='none';
+  fetch('/api/profile-gateways/rafapessoal/'+action,{method:'POST'}).then(function(response){
+    if(!response.ok)return response.text().then(function(text){throw new Error(text||('HTTP '+response.status));});
+    return response.json();
+  }).then(function(data){rafaGatewayRender(data);}).catch(function(exc){
+    error.style.display='block';error.textContent=exc.message;rafaGatewayStatus();
+  });
+}
+gwStatus();rafaGatewayStatus();
+setInterval(gwStatus,10000);setInterval(rafaGatewayStatus,10000);
 </script>
 """
 
@@ -562,6 +683,15 @@ async def proxy(request):
 
 async def on_startup(app):
     start_gateway()
+    app["profile_gateway_monitor"] = asyncio.create_task(_profile_gateway_monitor(app))
+
+
+async def on_cleanup(app):
+    task = app.get("profile_gateway_monitor")
+    if task is not None:
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
 
 
 def create_app():
@@ -572,12 +702,19 @@ def create_app():
     # lets the upstream decide.
     app = web.Application(middlewares=[pass_through_middleware])
     app.on_startup.append(on_startup)
+    app.on_cleanup.append(on_cleanup)
     app.router.add_get("/login", login_page)
     app.router.add_get("/upstream-login", upstream_login)
     app.router.add_get("/logout", logout)
     app.router.add_get("/api/health", health)
     app.router.add_post("/api/gateway/restart", restart_gateway)
     app.router.add_get("/api/gateway/status", gateway_status)
+    app.router.add_get(
+        "/api/profile-gateways/{profile}/status", profile_gateway_status
+    )
+    app.router.add_post(
+        "/api/profile-gateways/{profile}/{action}", profile_gateway_action
+    )
     app.router.add_route("*", "/{path_info:.*}", proxy)
     return app
 
