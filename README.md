@@ -10,7 +10,8 @@ This template goes beyond a basic Hermes deploy:
 
 - **Full dashboard access** — manage config, API keys, sessions, logs, analytics, cron jobs, and skills from your browser. No SSH or CLI needed.
 - **Messaging gateway included** — Telegram, Discord, and Slack bots run alongside the dashboard. Configure platform tokens in the UI, hit restart, and your bot is live.
-- **Gateway management widget** — a floating status indicator and restart button injected into the dashboard. See at a glance if the gateway is running, restart it after config changes without redeploying.
+- **Gateway management widget** — floating controls injected into the dashboard. The default gateway has status/restart, while the `rafapessoal` profile has independent Start/Stop/Restart controls.
+- **Persistent profile gateway state** — `rafapessoal` keeps its desired running/stopped state on the Railway volume, adopts an already-running Hermes PID after deploys, and is relaunched by a lightweight monitor if it crashes while enabled.
 - **Cookie-based auth** — password-protected login page with session cookies. No repeated browser auth prompts like basic auth templates.
 - **Auto-updates** — pulls the latest Hermes release on every container restart. Always up to date, no manual intervention. Disable with `AUTO_UPDATE=false` to pin a version.
 - **Zero config to start** — deploy with just a password, then set up everything else (LLM provider, API keys, messaging platforms) from the dashboard UI.
@@ -23,6 +24,21 @@ This template goes beyond a basic Hermes deploy:
 3. Deploy — log in at your Railway URL
 4. Add your LLM provider key (e.g. OpenRouter) on the **API Keys** page
 5. Optionally configure Telegram/Discord/Slack tokens and hit **Restart** on the gateway widget
+
+### Rafaela profile gateway
+
+The dashboard widget includes a dedicated **Rafaela** row. Its controls manage only:
+
+```text
+/root/.hermes/profiles/rafapessoal
+```
+
+- **Start** runs `hermes -p rafapessoal gateway run`
+- **Stop** validates the recorded PID and command line before terminating it
+- **Restart** performs a validated Stop followed by Start
+- The status refreshes every 10 seconds and shows the live PID
+
+The action API is session-protected through the upstream `/api/profiles` endpoint and only accepts the explicitly registered `rafapessoal` profile.
 
 ## Environment Variables
 
@@ -50,9 +66,11 @@ This persists sessions, memories, API keys, config, logs, and cron jobs.
 Internet -> Railway -> Auth Proxy (cookie login) -> Hermes Dashboard (port 9119)
                            |
                            +-> Messaging Gateway (Telegram/Discord/Slack)
+                           +-> Rafaela Profile Gateway (independent lifecycle)
                            +-> /api/health (unauthenticated, for Railway health checks)
                            +-> /api/gateway/restart (authenticated, restart bot)
                            +-> /api/gateway/status (authenticated, check bot status)
+                           +-> /api/profile-gateways/rafapessoal/* (authenticated)
 ```
 
 ## Resources

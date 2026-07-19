@@ -51,6 +51,7 @@ RUN mkdir -p /root/.hermes/{cron,sessions,logs,memories,skills,pairing,hooks,ima
 
 # Copy app files
 COPY auth_proxy.py /auth_proxy.py
+COPY profile_gateway_control.py /profile_gateway_control.py
 COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
 COPY filebrowser.json /filebrowser.json
 COPY entrypoint.sh /entrypoint.sh
